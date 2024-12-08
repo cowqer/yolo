@@ -49,6 +49,14 @@ __all__ = (
     "Attention",
     "PSA",
     "SCDown",
+    "GroupBatchnorm2d"
+    "SRU"
+    "CRU"
+    "ScConv"
+    "C2f_ScConv"
+    "se_block"
+    "Down_wt"
+    "WTConv2d"
 )
 
 
@@ -1106,3 +1114,387 @@ class SCDown(nn.Module):
     def forward(self, x):
         """Applies convolution and downsampling to the input tensor in the SCDown module."""
         return self.cv2(self.cv1(x))
+    
+####seekyou-10-29-2024
+import torch
+import torch.nn.functional as F
+import torch.nn as nn 
+
+
+class GroupBatchnorm2d(nn.Module):
+    def __init__(self, c_num:int, 
+                 group_num:int = 3, 
+                 eps:float = 1e-10
+                 ):
+        super(GroupBatchnorm2d,self).__init__()
+        assert c_num    >= group_num
+        self.group_num  = group_num
+        self.weight     = nn.Parameter( torch.randn(c_num, 1, 1)    )
+        self.bias       = nn.Parameter( torch.zeros(c_num, 1, 1)    )
+        self.eps        = eps
+    def forward(self, x):
+        N, C, H, W  = x.size()
+        x           = x.view(   N, self.group_num, -1   )
+        mean        = x.mean(   dim = 2, keepdim = True )
+        std         = x.std (   dim = 2, keepdim = True )
+        x           = (x - mean) / (std+self.eps)
+        x           = x.view(N, C, H, W)
+        return x * self.weight + self.bias
+
+
+class SRU(nn.Module):
+    def __init__(self,
+                 oup_channels:int, 
+                 group_num:int = 3,
+                 gate_treshold:float = 0.5,
+                 torch_gn:bool = True
+                 ):
+        super().__init__()
+        
+        self.gn             = nn.GroupNorm( num_channels = oup_channels, num_groups = group_num ) if torch_gn else GroupBatchnorm2d(c_num = oup_channels, group_num = group_num)
+        self.gate_treshold  = gate_treshold
+        self.sigomid        = nn.Sigmoid()
+
+    def forward(self,x):
+        gn_x        = self.gn(x)
+        w_gamma     = self.gn.weight/sum(self.gn.weight)
+        w_gamma     = w_gamma.view(1,-1,1,1)
+        reweigts    = self.sigomid( gn_x * w_gamma )
+        # Gate
+        w1          = torch.where(reweigts > self.gate_treshold, torch.ones_like(reweigts), reweigts) # 大于门限值的设为1，否则保留原值
+        w2          = torch.where(reweigts > self.gate_treshold, torch.zeros_like(reweigts), reweigts) # 大于门限值的设为0，否则保留原值
+        x_1         = w1 * x
+        x_2         = w2 * x
+        y           = self.reconstruct(x_1,x_2)
+        return y
+    
+    def reconstruct(self,x_1,x_2):
+        x_11,x_12 = torch.split(x_1, x_1.size(1)//2, dim=1)
+        x_21,x_22 = torch.split(x_2, x_2.size(1)//2, dim=1)
+        return torch.cat([ x_11+x_22, x_12+x_21 ],dim=1)
+
+
+class CRU(nn.Module):
+    '''
+    alpha: 0<alpha<1
+    '''
+    def __init__(self, 
+                 op_channel:int,
+                 alpha:float = 1/2,
+                 squeeze_radio:int = 2 ,
+                 group_size:int = 2,
+                 group_kernel_size:int = 3,
+                 ):
+        super().__init__()
+        self.up_channel     = up_channel   =   int(alpha*op_channel)
+        self.low_channel    = low_channel  =   op_channel-up_channel
+        self.squeeze1       = nn.Conv2d(up_channel,up_channel//squeeze_radio,kernel_size=1,bias=False)
+        self.squeeze2       = nn.Conv2d(low_channel,low_channel//squeeze_radio,kernel_size=1,bias=False)
+        #up
+        self.GWC            = nn.Conv2d(up_channel//squeeze_radio, op_channel,kernel_size=group_kernel_size, stride=1,padding=group_kernel_size//2, groups = group_size)
+        self.PWC1           = nn.Conv2d(up_channel//squeeze_radio, op_channel,kernel_size=1, bias=False)
+        #low
+        self.PWC2           = nn.Conv2d(low_channel//squeeze_radio, op_channel-low_channel//squeeze_radio,kernel_size=1, bias=False)
+        self.advavg         = nn.AdaptiveAvgPool2d(1)
+
+    def forward(self,x):
+        # Split
+        up,low  = torch.split(x,[self.up_channel,self.low_channel],dim=1)
+        up,low  = self.squeeze1(up),self.squeeze2(low)
+        # Transform
+        Y1      = self.GWC(up) + self.PWC1(up)
+        Y2      = torch.cat( [self.PWC2(low), low], dim= 1 )
+        # Fuse
+        out     = torch.cat( [Y1,Y2], dim= 1 )
+        out     = F.softmax( self.advavg(out), dim=1 ) * out
+        out1,out2 = torch.split(out,out.size(1)//2,dim=1)
+        return out1+out2
+
+
+class ScConv(nn.Module):
+    def __init__(self,
+                op_channel:int,
+                group_num:int = 3,
+                gate_treshold:float = 0.5,
+                alpha:float = 1/2,
+                squeeze_radio:int = 2 ,
+                group_size:int = 2,
+                group_kernel_size:int = 3,
+                 ):
+        super().__init__()
+        self.SRU = SRU( op_channel, 
+                       group_num            = group_num,  
+                       gate_treshold        = gate_treshold )
+        self.CRU = CRU( op_channel, 
+                       alpha                = alpha, 
+                       squeeze_radio        = squeeze_radio ,
+                       group_size           = group_size ,
+                       group_kernel_size    = group_kernel_size )
+    
+    def forward(self,x):
+        x = self.SRU(x)
+        x = self.CRU(x)
+        return x
+
+
+# if __name__ == '__main__':
+#     x       = torch.randn(1,32,16,16)
+#     model   = ScConv(32) #模型将处理具有 32个通道的输入张量
+#     print(model(x).shape)
+
+class C2f_ScConv(nn.Module):
+    """Faster Implementation of CSP Bottleneck with 2 convolutions."""
+
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        """Initializes a CSP bottleneck with 2 convolutions and n Bottleneck blocks for faster processing."""
+        super().__init__()
+        self.c = int(c2 * e)  # hidden channels
+        self.cv1 = Conv(c1, 2 * self.c, 1, 1)
+        self.cv2 = ScConv((2 + n) * self.c, c2, 1)  # optional act=FReLU(c2)
+        self.m = nn.ModuleList(Bottleneck(self.c, self.c, shortcut, g, k=((3, 3), (3, 3)), e=1.0) for _ in range(n))
+
+    def forward(self, x):
+        """Forward pass through C2f layer."""
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))
+
+    def forward_split(self, x):
+        """Forward pass using split() instead of chunk()."""
+        y = list(self.cv1(x).split((self.c, self.c), 1))
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))
+####seekyou-10-29-2024
+####seekyou-10-30-2024
+class se_block(nn.Module):   #SEnet
+    def __init__(self, channel, reduction=16):
+        super(se_block, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channel, channel // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channel // reduction, channel, bias=False),
+            nn.Sigmoid()
+        )
+ 
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y.expand_as(x)
+####seekyou-10-30-2024
+####seekyou-11-1-2024
+import torch
+import torch.nn as nn
+from pytorch_wavelets import DWTForward  # Import for Haar Wavelet Downsampling
+
+# GitHub: https://github.com/apple1986/HWD
+# Paper: Haar wavelet downsampling: A simple but effective downsampling module for semantic segmentation (PR2023)
+# https://www.sciencedirect.com/science/article/pii/S0031320323005174
+
+class Down_wt(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super(Down_wt, self).__init__()
+        # Haar Wavelet transform layer
+        self.wt = DWTForward(J=1, mode='zero', wave='haar')
+        # Convolution, batch normalization, and ReLU activation
+        self.conv_bn_relu = nn.Sequential(
+            nn.Conv2d(in_ch * 4, out_ch, kernel_size=1, stride=1),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x):
+        yL, yH = self.wt(x)
+        y_HL = yH[0][:, :, 0, ::]
+        y_LH = yH[0][:, :, 1, ::]
+        y_HH = yH[0][:, :, 2, ::]
+        x = torch.cat([yL, y_HL, y_LH, y_HH], dim=1)
+        x = self.conv_bn_relu(x)
+        return x
+
+# if __name__ == '__main__':
+#     block = Down_wt(64, 64)  # Initialize with input and output channels
+#     input = torch.rand(3, 64, 64, 64)  # Input tensor of shape (B, C, H, W)
+#     output = block(input)
+#     print(output.size())
+####seekyou-11-1-2024
+
+####seekyou-11-2-2024import pywt
+import pywt.data
+import torch
+from torch import nn
+from functools import partial
+import torch.nn.functional as F
+
+
+# 论文地址 https://arxiv.org/pdf/2407.05848
+def create_wavelet_filter(wave, in_size, out_size, type=torch.float):
+    w = pywt.Wavelet(wave)
+    dec_hi = torch.tensor(w.dec_hi[::-1], dtype=type)
+    dec_lo = torch.tensor(w.dec_lo[::-1], dtype=type)
+    dec_filters = torch.stack([dec_lo.unsqueeze(0) * dec_lo.unsqueeze(1),
+                               dec_lo.unsqueeze(0) * dec_hi.unsqueeze(1),
+                               dec_hi.unsqueeze(0) * dec_lo.unsqueeze(1),
+                               dec_hi.unsqueeze(0) * dec_hi.unsqueeze(1)], dim=0)
+
+    dec_filters = dec_filters[:, None].repeat(in_size, 1, 1, 1)
+
+    rec_hi = torch.tensor(w.rec_hi[::-1], dtype=type).flip(dims=[0])
+    rec_lo = torch.tensor(w.rec_lo[::-1], dtype=type).flip(dims=[0])
+    rec_filters = torch.stack([rec_lo.unsqueeze(0) * rec_lo.unsqueeze(1),
+                               rec_lo.unsqueeze(0) * rec_hi.unsqueeze(1),
+                               rec_hi.unsqueeze(0) * rec_lo.unsqueeze(1),
+                               rec_hi.unsqueeze(0) * rec_hi.unsqueeze(1)], dim=0)
+
+    rec_filters = rec_filters[:, None].repeat(out_size, 1, 1, 1)
+
+    return dec_filters, rec_filters
+
+
+def wavelet_transform(x, filters):
+    b, c, h, w = x.shape
+    pad = (filters.shape[2] // 2 - 1, filters.shape[3] // 2 - 1)
+    print("Filters Shape:", filters.shape)  # Should match the expected input channels
+    print("Input Shape:", x.shape)  # Should have the number of channels that matches the filters
+    x = F.conv2d(x, filters, stride=2, groups=c, padding=pad)
+    print("Before reshape:", x.shape)
+
+    x = x.reshape(b, c, 4, h // 2, w // 2)
+    return x
+
+
+def inverse_wavelet_transform(x, filters):
+    b, c, _, h_half, w_half = x.shape
+    pad = (filters.shape[2] // 2 - 1, filters.shape[3] // 2 - 1)
+    x = x.reshape(b, c * 4, h_half, w_half)
+    x = F.conv_transpose2d(x, filters, stride=2, groups=c, padding=pad)
+    return x
+
+
+# Wavelet Transform Conv(WTConv2d)
+class WTConv2d(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=2, bias=True, wt_levels=1, wt_type='db1'):
+        super(WTConv2d, self).__init__()
+
+        assert in_channels == out_channels
+        print("in&out_channels:",in_channels)
+
+        self.in_channels = in_channels
+        self.wt_levels = wt_levels
+        self.stride = stride
+        self.dilation = 1
+
+        self.wt_filter, self.iwt_filter = create_wavelet_filter(wt_type, in_channels, in_channels, torch.float)
+        self.wt_filter = nn.Parameter(self.wt_filter, requires_grad=False)
+        self.iwt_filter = nn.Parameter(self.iwt_filter, requires_grad=False)
+
+        self.wt_function = partial(wavelet_transform, filters=self.wt_filter)
+        self.iwt_function = partial(inverse_wavelet_transform, filters=self.iwt_filter)
+
+        self.base_conv = nn.Conv2d(in_channels, in_channels, kernel_size, padding='same', stride=1, dilation=1,
+                                   groups=in_channels, bias=bias)
+        self.base_scale = _ScaleModule([1, in_channels, 1, 1])
+
+        self.wavelet_convs = nn.ModuleList(
+            [nn.Conv2d(in_channels * 4, in_channels * 4, kernel_size, padding='same', stride=1, dilation=1,
+                       groups=in_channels * 4, bias=False) for _ in range(self.wt_levels)]
+        )
+        self.wavelet_scale = nn.ModuleList(
+            [_ScaleModule([1, in_channels * 4, 1, 1], init_scale=0.1) for _ in range(self.wt_levels)]
+        )
+
+        if self.stride > 1:
+            self.stride_filter = nn.Parameter(torch.ones(in_channels, 1, 1, 1), requires_grad=False)
+            self.do_stride = lambda x_in: F.conv2d(x_in, self.stride_filter, bias=None, stride=self.stride,
+                                                   groups=in_channels)
+        else:
+            self.do_stride = None
+
+    def forward(self, x):
+
+        x_ll_in_levels = []
+        x_h_in_levels = []
+        shapes_in_levels = []
+
+        curr_x_ll = x
+        # print("x:",x.shape)
+        for i in range(self.wt_levels):
+            curr_shape = curr_x_ll.shape
+            shapes_in_levels.append(curr_shape)
+            if (curr_shape[2] % 2 > 0) or (curr_shape[3] % 2 > 0):
+                curr_pads = (0, curr_shape[3] % 2, 0, curr_shape[2] % 2)
+                curr_x_ll = F.pad(curr_x_ll, curr_pads)
+            # print(curr_shape)
+            curr_x = self.wt_function(curr_x_ll)
+            curr_x_ll = curr_x[:, :, 0, :, :]
+
+            shape_x = curr_x.shape
+            curr_x_tag = curr_x.reshape(shape_x[0], shape_x[1] * 4, shape_x[3], shape_x[4])
+            curr_x_tag = self.wavelet_scale[i](self.wavelet_convs[i](curr_x_tag))
+            curr_x_tag = curr_x_tag.reshape(shape_x)
+
+            x_ll_in_levels.append(curr_x_tag[:, :, 0, :, :])
+            x_h_in_levels.append(curr_x_tag[:, :, 1:4, :, :])
+
+        next_x_ll = 0
+
+        for i in range(self.wt_levels - 1, -1, -1):
+            curr_x_ll = x_ll_in_levels.pop()
+            curr_x_h = x_h_in_levels.pop()
+            curr_shape = shapes_in_levels.pop()
+
+            curr_x_ll = curr_x_ll + next_x_ll
+
+            curr_x = torch.cat([curr_x_ll.unsqueeze(2), curr_x_h], dim=2)
+            next_x_ll = self.iwt_function(curr_x)
+
+            next_x_ll = next_x_ll[:, :, :curr_shape[2], :curr_shape[3]]
+
+        x_tag = next_x_ll
+        assert len(x_ll_in_levels) == 0
+
+        x = self.base_scale(self.base_conv(x))
+        x = x + x_tag
+
+        if self.do_stride is not None:
+            x = self.do_stride(x)
+
+        return x
+
+
+class _ScaleModule(nn.Module):
+    def __init__(self, dims, init_scale=1.0, init_bias=0):
+        super(_ScaleModule, self).__init__()
+        self.dims = dims
+        self.weight = nn.Parameter(torch.ones(*dims) * init_scale)
+        self.bias = None
+
+    def forward(self, x):
+        return torch.mul(self.weight, x)
+
+
+class DepthwiseSeparableConvWithWTConv2d(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=3):
+        super(DepthwiseSeparableConvWithWTConv2d, self).__init__()
+
+        # 深度卷积：使用 WTConv2d 替换 3x3 卷积
+        self.depthwise = WTConv2d(in_channels, in_channels, kernel_size=kernel_size)
+
+        # 逐点卷积：使用 1x1 卷积
+        self.pointwise = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0, bias=False)
+
+    def forward(self, x):
+        x = self.depthwise(x)
+        x = self.pointwise(x)
+        return x
+
+
+# if __name__ == '__main__':
+#     input = torch.randn(3, 32, 64, 64)  # b c h w输入
+#     wtconv = DepthwiseSeparableConvWithWTConv2d(in_channels=32, out_channels=32)
+#     output = wtconv(input)
+#     print(output.size())
+
+####seekyou-11-2-2024
+####seekyou-12-8-2024

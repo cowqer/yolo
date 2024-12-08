@@ -56,6 +56,15 @@ from .block import (
     RepVGGDW,
     ResNetLayer,
     SCDown,
+    GroupBatchnorm2d,
+    SRU,
+    CRU,
+    ScConv,
+    C2f_ScConv,
+    se_block,
+    Down_wt,
+    WTConv2d
+    
 )
 from .conv import (
     CBAM,
@@ -156,4 +165,12 @@ __all__ = (
     "C2fCIB",
     "Attention",
     "PSA",
+    "GroupBatchnorm2d"
+    "SRU"
+    "CRU"
+    "ScConv"
+    "C2f_ScConv"
+    "se_block"
+    "Down_wt"
+    "WTConv2d"
 )

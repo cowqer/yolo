@@ -8,6 +8,8 @@ import numpy as np
 import torch
 from PIL import Image
 
+# from ultralytics.ultralytics.utils.torch_utils import intersect_dicts
+
 from ultralytics.cfg import TASK2DATA, get_cfg, get_save_dir
 from ultralytics.engine.results import Results
 from ultralytics.hub import HUB_WEB_ROOT, HUBTrainingSession
@@ -81,7 +83,7 @@ class Model(nn.Module):
 
     def __init__(
         self,
-        model: Union[str, Path] = "yolo11n.pt",
+        model: Union[str, Path] = None,
         task: str = None,
         verbose: bool = False,
     ) -> None:
@@ -256,6 +258,15 @@ class Model(nn.Module):
         self.model.args = {**DEFAULT_CFG_DICT, **self.overrides}  # combine default and model args (prefer model args)
         self.model.task = self.task
         self.model_name = cfg
+        
+        """ 添加代码bug """
+        # ckpt = torch.load('yolov8n.pt')
+        # csd = ckpt['model'].float().state_dict()
+        # csd = intersect_dicts(csd,self.model.state_dict())
+        # self.model.load_state_dict(csd,strict = False)
+        # print(f'Transferred {len(csd)}/{len(self.model.state_dict())} items')
+        """ 添加代码bug """
+
 
     def _load(self, weights: str, task=None) -> None:
         """
@@ -794,10 +805,10 @@ class Model(nn.Module):
             args["resume"] = self.ckpt_path
 
         self.trainer = (trainer or self._smart_load("trainer"))(overrides=args, _callbacks=self.callbacks)
-        if not args.get("resume"):  # manually set model only if not resuming
-            self.trainer.model = self.trainer.get_model(weights=self.model if self.ckpt else None, cfg=self.model.yaml)
-            self.model = self.trainer.model
-
+        # if not args.get("resume"):  # manually set model only if not resuming
+        #     self.trainer.model = self.trainer.get_model(weights=self.model if self.ckpt else None, cfg=self.model.yaml)
+        #     self.model = self.trainer.model
+        self.trainer.model = self.model
         self.trainer.hub_session = self.session  # attach optional HUB session
         self.trainer.train()
         # Update model and cfg after training

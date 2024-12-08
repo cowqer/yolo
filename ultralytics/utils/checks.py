@@ -458,7 +458,7 @@ def check_torchvision():
             )
 
 
-def check_suffix(file="yolo11n.pt", suffix=".pt", msg=""):
+def check_suffix(file="yolov8n.pt", suffix=".pt", msg=""):
     """Check file(s) for acceptable suffix."""
     if file and suffix:
         if isinstance(suffix, str):
@@ -671,7 +671,7 @@ def check_amp(model):
         (bool): Returns True if the AMP functionality works correctly with YOLO11 model, else False.
     """
     from ultralytics.utils.torch_utils import autocast
-
+    
     device = next(model.parameters()).device  # get model device
     if device.type in {"cpu", "mps"}:
         return False  # AMP only used on CUDA devices
@@ -692,8 +692,9 @@ def check_amp(model):
     warning_msg = "Setting 'amp=True'. If you experience zero-mAP or NaN losses you can disable AMP with amp=False."
     try:
         from ultralytics import YOLO
-
-        assert amp_allclose(YOLO("yolo11n.pt"), im)
+        ##seeekyou=12-8-原本没有reture False，为了避免再下载yolov8的pt文件添加的
+        # assert amp_allclose(YOLO("yolov8n.pt"), im)
+        return False
         LOGGER.info(f"{prefix}checks passed ✅")
     except ConnectionError:
         LOGGER.warning(
