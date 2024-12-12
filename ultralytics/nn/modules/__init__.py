@@ -63,8 +63,9 @@ from .block import (
     C2f_ScConv,
     se_block,
     Down_wt,
-    WTConv2d
-    
+    WTConv2d,
+    CoordAtt,
+    C2f_CoordAtt,
 )
 from .conv import (
     CBAM,
@@ -80,6 +81,7 @@ from .conv import (
     LightConv,
     RepConv,
     SpatialAttention,
+    RotateConv,
 )
 from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect, v10Detect
 from .transformer import (
@@ -98,6 +100,7 @@ from .transformer import (
 __all__ = (
     "Conv",
     "Conv2",
+    "RotateConv",
     "LightConv",
     "RepConv",
     "DWConv",
@@ -173,4 +176,8 @@ __all__ = (
     "se_block"
     "Down_wt"
     "WTConv2d"
+    "CoordAtt"
+    "C2f_CoordAtt"
+    "AdaptiveRotatedConv2d"
+    "RountingFunction"
 )

@@ -35,6 +35,7 @@ from ultralytics.nn.modules import (
     BottleneckCSP,
     C2f,
     C2fAttn,
+    C2f_CoordAtt,
     C2fCIB,
     C2fPSA,
     C3Ghost,
@@ -46,6 +47,7 @@ from ultralytics.nn.modules import (
     Concat,
     Conv,
     Conv2,
+    RotateConv,
     ConvTranspose,
     Detect,
     DWConv,
@@ -206,7 +208,7 @@ class BaseModel(nn.Module):
         """
         if not self.is_fused():
             for m in self.model.modules():
-                if isinstance(m, (Conv, Conv2, DWConv)) and hasattr(m, "bn"):
+                if isinstance(m, (Conv, RotateConv, Conv2, DWConv)) and hasattr(m, "bn"):
                     if isinstance(m, Conv2):
                         m.fuse_convs()
                     m.conv = fuse_conv_and_bn(m.conv, m.bn)  # update conv
@@ -606,7 +608,7 @@ class RTDETRDetectionModel(DetectionModel):
         return x
 
 
-class WorldModel(DetectionModel):
+class WorldModel(DetectionModel):###Detection不用管这个
     """YOLOv8 World Model."""
     # 该模型适用于需要结合文本信息来理解视觉数据的任务，例如图像字幕、场景理解或任何需要通过文本派生的上下文感知进行对象检测的应用程序。
     def __init__(self, cfg="yolov8s-world.yaml", ch=3, nc=None, verbose=True):
@@ -965,6 +967,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
 
     if act:
         Conv.default_act = eval(act)  # redefine default activation, i.e. Conv.default_act = nn.SiLU()
+        RotateConv.default_act = eval(act)
         if verbose:
             LOGGER.info(f"{colorstr('activation:')} {act}")  # print
 
@@ -984,6 +987,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         if m in {
             Classify,
             Conv,
+            RotateConv,
             ConvTranspose,
             GhostConv,
             Bottleneck,
@@ -1005,6 +1009,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             AConv,
             SPPELAN,
             C2fAttn,
+            C2f_CoordAtt,
             C3,
             C3TR,
             C3Ghost,
@@ -1024,7 +1029,6 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 args[2] = int(
                     max(round(min(args[2], max_channels // 2 // 32)) * width, 1) if args[2] > 1 else args[2]
                 )  # num heads
-
             args = [c1, c2, *args[1:]]
             if m in {
                 BottleneckCSP,
@@ -1033,6 +1037,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 C2f,
                 C3k2,
                 C2fAttn,
+                C2f_CoordAtt,
                 C3,
                 C3TR,
                 C3Ghost,
@@ -1040,7 +1045,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 RepC3,
                 C2fPSA,
                 C2fCIB,
-                C2PSA,
+                C2PSA
             }:
                 args.insert(2, n)  # number of repeats
                 n = 1 #对于许多模块（如BottleneckCSP 、 C1 、 C2等），它将重复次数 ( n ) 插入参数列表中。这表明该层可以被构造多次。

@@ -2,6 +2,7 @@ path: ../datasets/
 
 train: /data/seekyou/SSDD/yolo_v8/train/images # val images
 val: /data/seekyou/SSDD/yolo_v8/test/images #
+
 # test: /data/seekyou/SSDD/yolo_v8/test/images # test images (optional)
 
 # Classes

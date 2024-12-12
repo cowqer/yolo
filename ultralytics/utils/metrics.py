@@ -190,7 +190,7 @@ def _get_covariance_matrix(boxes):
     return a * cos2 + b * sin2, a * sin2 + b * cos2, (a - b) * cos * sin
 
 
-def probiou(obb1, obb2, CIoU=False, eps=1e-7):
+def probiou(obb1, obb2, CIoU=False, eps=1e-7, aspect_ratio_weight=1.0):
     """
     Calculate probabilistic IoU between oriented bounding boxes.
 
@@ -209,6 +209,7 @@ def probiou(obb1, obb2, CIoU=False, eps=1e-7):
         OBB format: [center_x, center_y, width, height, rotation_angle].
         If CIoU is True, returns CIoU instead of IoU.
     """
+
     x1, y1 = obb1[..., :2].split(1, dim=-1)
     x2, y2 = obb2[..., :2].split(1, dim=-1)
     a1, b1, c1 = _get_covariance_matrix(obb1)
@@ -235,6 +236,54 @@ def probiou(obb1, obb2, CIoU=False, eps=1e-7):
         return iou - v * alpha  # CIoU
     return iou
 
+def ARprobiou(obb1, obb2, ARIOU=True, alpha=1, eps=1e-7):
+    """
+    Calculate probabilistic IoU between oriented bounding boxes.
+
+    Implements the algorithm from https://arxiv.org/pdf/2106.06072v1.pdf.
+
+    Args:
+        obb1 (torch.Tensor): Ground truth OBBs, shape (N, 5), format xywhr.
+        obb2 (torch.Tensor): Predicted OBBs, shape (N, 5), format xywhr.
+        CIoU (bool, optional): If True, calculate CIoU. Defaults to False.
+        eps (float, optional): Small value to avoid division by zero. Defaults to 1e-7.
+
+    Returns:
+        (torch.Tensor): OBB similarities, shape (N,).
+
+    Note:
+        OBB format: [center_x, center_y, width, height, rotation_angle].
+        If CIoU is True, returns CIoU instead of IoU.
+    """
+    x1, y1 = obb1[..., :2].split(1, dim=-1)
+    x2, y2 = obb2[..., :2].split(1, dim=-1)
+    #用于从旋转矩形框的参数（cx, cy, w, h, angle）计算协方差矩阵的三个值 (a, b, c)，这与旋转框的方向和形状相关。协方差矩阵是用来描述旋转框的方向和形状的。
+    a1, b1, c1 = _get_covariance_matrix(obb1)
+    a2, b2, c2 = _get_covariance_matrix(obb2)
+    #t1 和 t2 分别计算的是框之间的平移差异。
+    #t3 则计算的是框的形状差异（基于协方差矩阵的项）。
+    t1 = (
+        ((a1 + a2) * (y1 - y2).pow(2) + (b1 + b2) * (x1 - x2).pow(2)) / ((a1 + a2) * (b1 + b2) - (c1 + c2).pow(2) + eps)
+    ) * 0.25
+    t2 = (((c1 + c2) * (x2 - x1) * (y1 - y2)) / ((a1 + a2) * (b1 + b2) - (c1 + c2).pow(2) + eps)) * 0.5
+    t3 = (
+        ((a1 + a2) * (b1 + b2) - (c1 + c2).pow(2))
+        / (4 * ((a1 * b1 - c1.pow(2)).clamp_(0) * (a2 * b2 - c2.pow(2)).clamp_(0)).sqrt() + eps)
+        + eps
+    ).log() * 0.5
+    bd = (t1 + t2 + t3).clamp(eps, 100.0)
+    hd = (1.0 - (-bd).exp() + eps).sqrt()
+    #hd 计算的是 Hamming 距离的一种度量方法，即基于 bd 计算出的距离度量，表明两个旋转矩形框之间的形状、位置和方向的匹配程度。
+    if ARIOU:  ##seekyou-12-11-2024
+        w1, h1 = obb1[..., 2:4].split(1, dim=-1)
+        w2, h2 = obb2[..., 2:4].split(1, dim=-1)
+        v = (4 / math.pi**2) * ((w2 / h2).atan() - (w1 / h1).atan()).pow(2)
+        #seekyou-12-11-2024
+        aspect_ratio1 = torch.max(w1 / (h1 + eps), h1 / (w1 + eps))
+        ar_weight = (2 * aspect_ratio1.pow(alpha) / (1 + aspect_ratio1.pow(alpha) + eps)).sqrt() 
+        hd = hd * ar_weight
+    iou = 1 - hd
+    return iou
 
 def batch_probiou(obb1, obb2, eps=1e-7):
     """
